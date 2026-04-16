@@ -173,7 +173,7 @@ def call_claude(api_key, system, prompt, max_tokens=8000):
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
     msg = client.messages.create(
-        model="claude-3-7-sonnet-20250219",
+        model="claude-3-5-sonnet-20241022",
         max_tokens=max_tokens,
         system=system,
         messages=[{"role":"user","content":prompt}],
@@ -438,7 +438,7 @@ with st.sidebar:
         st.session_state.api_key = api_key
         st.success("✅ Ключ збережено")
     st.divider()
-    st.caption(f"Модель: claude-sonnet-4-20250514")
+    st.caption(f"Модель: claude-3-5-sonnet-20241022")
     st.caption(f"Крок: {st.session_state.step}")
     st.divider()
     if st.button("🔄 Почати спочатку", use_container_width=True):
