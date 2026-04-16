@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import urllib.request
 
 # ─── Page Config ───
 st.set_page_config(
@@ -256,7 +257,39 @@ def generate_page(api_key, template_html, page_type, cfg, nav, stop_words, seo_k
     if idx > 0: result = result[idx:]
     return result
 
+def split_page(html):
+    """Split page into (before_main, main_content, after_main)."""
+    m1 = re.search(r'(<main[^>]*>)', html)
+    m2 = re.search(r'(</main>)', html)
+    if m1 and m2:
+        before = html[:m1.end()]
+        main = html[m1.end():m2.start()]
+        after = html[m2.start():]
+        return before, main, after
+    return html, "", ""
+
+def generate_main_only(api_key, main_html, page_type, cfg, nav, stop_words, seo_kw, extra):
+    """Generate only main content — much faster than full page."""
+    system = (
+        f"Rewrite ONLY the inner HTML content. No <main>, no <!DOCTYPE>, no markdown.\n"
+        f"Language: {cfg['language']} | Niche: {cfg['theme']} | Brand: {cfg['brand']}\n"
+        f"Geo: {cfg['geo']} | Address: {cfg['address']} | Phone: {cfg['phone']} | Email: {cfg['email']}\n"
+        f"NEVER use: {stop_words} | SEO keywords: {seo_kw}\n"
+        f"Extra: {extra}\n"
+        f"PRESERVE HTML structure, CSS classes. REPLACE ALL text in {cfg['language']}.\n"
+        f"Keep image src paths, update alt. Output ONLY HTML."
+    )
+    result = call_claude(api_key, system, f"Rewrite this {page_type} content:\n\n{main_html}", max_tokens=12000)
+    result = result.strip()
+    if result.startswith("```"):
+        result = re.sub(r'^```\w*\n?', '', result)
+        result = re.sub(r'\n?```$', '', result)
+    result = re.sub(r'^<main[^>]*>', '', result)
+    result = re.sub(r'</main>\s*$', '', result)
+    return result
+
 def do_replace(html, cfg, nav, fmt):
+    """Simple find-and-replace for template strings."""
     ext = ".php" if fmt == "php" else ".html"
     fmap = {
         "listing": f"{nav.get('listing_slug','services')}{ext}",
@@ -328,6 +361,75 @@ def gen_htaccess(domain):
         "</IfModule>\n"
     )
 
+# ═══════════════════════════════════════
+# CDN → Local: download all libs
+# ═══════════════════════════════════════
+CDN_FILES = {
+    # CSS
+    "https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.6.0/css/all.min.css": "libs/fontawesome.min.css",
+    "https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css": "libs/swiper.min.css",
+    "https://cdn.jsdelivr.net/npm/@fancyapps/ui@5.0/dist/fancybox/fancybox.css": "libs/fancybox.css",
+    "https://unpkg.com/aos@2.3.1/dist/aos.css": "libs/aos.css",
+    # JS
+    "https://code.jquery.com/jquery-3.7.1.min.js": "libs/jquery.min.js",
+    "https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js": "libs/swiper.min.js",
+    "https://cdn.jsdelivr.net/npm/@fancyapps/ui@5.0/dist/fancybox/fancybox.umd.js": "libs/fancybox.umd.js",
+    "https://unpkg.com/aos@2.3.1/dist/aos.js": "libs/aos.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js": "libs/gsap.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/ScrollTrigger.min.js": "libs/ScrollTrigger.min.js",
+    "https://unpkg.com/typed.js@2.1.0/dist/typed.umd.js": "libs/typed.umd.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/countup.js/2.0.7/countUp.umd.js": "libs/countUp.umd.js",
+    "https://cdn.jsdelivr.net/npm/@popperjs/core@2/dist/umd/popper.min.js": "libs/popper.min.js",
+    "https://cdn.jsdelivr.net/npm/tippy.js@6/dist/tippy.umd.min.js": "libs/tippy.umd.min.js",
+    "https://cdn.jsdelivr.net/npm/chart.js": "libs/chart.min.js",
+}
+
+FA_WEBFONTS = {
+    "https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.6.0/webfonts/fa-solid-900.woff2": "webfonts/fa-solid-900.woff2",
+    "https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.6.0/webfonts/fa-regular-400.woff2": "webfonts/fa-regular-400.woff2",
+    "https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.6.0/webfonts/fa-brands-400.woff2": "webfonts/fa-brands-400.woff2",
+}
+
+GOOGLE_FONTS_REMOVE = [
+    '<link href="https://fonts.googleapis.com" rel="preconnect"/>',
+    '<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>',
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@700&display=swap" rel="stylesheet"/>',
+]
+
+@st.cache_data(show_spinner=False)
+def download_cdn_files():
+    """Download all CDN files once and cache them."""
+    files = {}
+    all_urls = {**CDN_FILES, **FA_WEBFONTS}
+    for url, local_path in all_urls.items():
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                files[local_path] = resp.read()
+        except Exception:
+            pass
+    return files
+
+def localize_cdns(html, output_dict, log_fn=None):
+    """Replace CDN URLs with local paths and add files to output."""
+    if log_fn: log_fn("📦 CDN → локальні файли...")
+    
+    cached = download_cdn_files()
+    
+    # Add downloaded files to output
+    for local_path, data in cached.items():
+        output_dict[local_path] = data
+    
+    # Replace CDN URLs in HTML
+    for cdn_url, local_path in CDN_FILES.items():
+        html = html.replace(cdn_url, local_path)
+    
+    # Remove Google Fonts links (use system fonts instead)
+    for link in GOOGLE_FONTS_REMOVE:
+        html = html.replace(link, "")
+    
+    return html
+
 def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_fn=None):
     output = {}
     ext = ".php" if fmt=="php" else ".html"
@@ -342,8 +444,29 @@ def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_f
         "over-ons.php": f"{nav.get('about_slug','about')}{ext}",
     }
 
-    ai_pages = [
-        ("index.php", "Home"),
+    # Step 1: Generate index.php FULLY (gets translated header/footer)
+    if log_fn: log_fn(f"📝 Home (повна генерація — header/footer)...")
+    index_tpl = tpl.get("index.php", b"").decode("utf-8", errors="replace")
+    try:
+        index_html = generate_page(api_key, index_tpl, "Home / Landing page", site_cfg, nav, stop_words, seo_kw, extra)
+        out_name = "index.php" if fmt=="php" else "index.html"
+        output[out_name] = index_html.encode("utf-8")
+        if log_fn: log_fn(f"✅ Home")
+    except Exception as e:
+        if log_fn: log_fn(f"❌ Home — ПОМИЛКА: {str(e)[:200]}")
+        index_html = None
+    time.sleep(2)
+
+    # Step 2: Extract header/footer from generated index for reuse
+    shared_header = None
+    shared_footer = None
+    if index_html:
+        before, _, after = split_page(index_html)
+        shared_header = before  # everything up to and including <main>
+        shared_footer = after   # everything from </main> onwards
+
+    # Step 3: Generate remaining pages — ONLY <main> content (2x faster)
+    remaining_pages = [
         ("recepten.php", nav.get("listing_page","Listing")),
         ("maaltijdplanning.php", nav.get("feature_page","Feature")),
         ("over-ons.php", nav.get("about","About")),
@@ -353,33 +476,51 @@ def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_f
         ("terms-of-service.php", "Terms of Service"),
     ]
 
-    for tpl_name, page_type in ai_pages:
+    for tpl_name, page_type in remaining_pages:
         if log_fn: log_fn(f"📝 {page_type}...")
         tpl_html = tpl.get(tpl_name, b"").decode("utf-8", errors="replace")
         if not tpl_html:
             continue
         try:
-            new_html = generate_page(api_key, tpl_html, page_type, site_cfg, nav, stop_words, seo_kw, extra)
+            if shared_header and shared_footer:
+                # Fast path: generate only <main> content
+                _, tpl_main, _ = split_page(tpl_html)
+                new_main = generate_main_only(api_key, tpl_main, page_type, site_cfg, nav, stop_words, seo_kw, extra)
+                # Update header meta tags for this page
+                header = re.sub(r'<title>[^<]*</title>',
+                    f'<title>{page_type} | {site_cfg["brand"]} {site_cfg["geo"]}</title>', shared_header)
+                full_page = header + "\n" + new_main + "\n" + shared_footer
+            else:
+                # Fallback: full page generation
+                full_page = generate_page(api_key, tpl_html, page_type, site_cfg, nav, stop_words, seo_kw, extra)
+
             out_name = fmap.get(tpl_name, tpl_name)
             if fmt == "html": out_name = out_name.replace(".php",".html")
-            output[out_name] = new_html.encode("utf-8")
+            output[out_name] = full_page.encode("utf-8")
             if log_fn: log_fn(f"✅ {page_type}")
         except Exception as e:
             if log_fn: log_fn(f"❌ {page_type} — ПОМИЛКА: {str(e)[:200]}")
-        time.sleep(3)
+        time.sleep(2)
 
-    # 404
-    if log_fn: log_fn(f"📝 404 сторінка...")
+    # 404 — generate only <main>
+    if log_fn: log_fn(f"📝 404...")
     try:
         h404 = tpl.get("404.html", b"").decode("utf-8", errors="replace")
-        new_404 = generate_page(api_key, h404, "404 Error page", site_cfg, nav, stop_words, seo_kw, extra)
-        output["404.html"] = new_404.encode("utf-8")
+        if shared_header and shared_footer:
+            _, tpl_main, _ = split_page(h404)
+            new_main = generate_main_only(api_key, tpl_main, "404 Error page", site_cfg, nav, stop_words, seo_kw, extra)
+            header = re.sub(r'<title>[^<]*</title>',
+                f'<title>404 | {site_cfg["brand"]}</title>', shared_header)
+            full_404 = header + "\n" + new_main + "\n" + shared_footer
+        else:
+            full_404 = generate_page(api_key, h404, "404 Error page", site_cfg, nav, stop_words, seo_kw, extra)
+        output["404.html"] = full_404.encode("utf-8")
         if log_fn: log_fn(f"✅ 404")
     except Exception as e:
         h404 = tpl.get("404.html", b"").decode("utf-8", errors="replace")
         h404 = do_replace(h404, site_cfg, nav, fmt)
         output["404.html"] = h404.encode("utf-8")
-        if log_fn: log_fn(f"⚠️ 404 — fallback заміна")
+        if log_fn: log_fn(f"⚠️ 404 — fallback")
 
     # Config files
     output["sitemap.xml"] = gen_sitemap(site_cfg["domain"], nav, fmt).encode("utf-8")
@@ -393,6 +534,22 @@ def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_f
         elif name in ("favicon.ico","favicon-16x16.png","favicon-32x32.png",
                        "favicon-192x192.png","apple-touch-icon.png"):
             output[name] = data
+
+    # Localize CDNs — download external libs to local files
+    if log_fn: log_fn("📦 Локалізація CDN бібліотек...")
+    cdn_cache = download_cdn_files()
+    for local_path, data in cdn_cache.items():
+        output[local_path] = data
+    
+    # Replace CDN URLs in all HTML/PHP files
+    for fname in list(output.keys()):
+        if fname.endswith((".php", ".html")):
+            html = output[fname].decode("utf-8", errors="replace")
+            for cdn_url, local_path in CDN_FILES.items():
+                html = html.replace(cdn_url, local_path)
+            for link in GOOGLE_FONTS_REMOVE:
+                html = html.replace(link, "")
+            output[fname] = html.encode("utf-8")
 
     return output
 
