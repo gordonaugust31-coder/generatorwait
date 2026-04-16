@@ -14,6 +14,8 @@ import random
 import string
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # ─── Page Config ───
 st.set_page_config(
@@ -320,11 +322,11 @@ def gen_htaccess(domain):
 
 def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_fn=None):
     output = {}
+    lock = threading.Lock()
     ext = ".php" if fmt=="php" else ".html"
 
     if log_fn: log_fn(f"🧭 Навігація...")
     nav = generate_nav(api_key, site_cfg["theme"], site_cfg["language"], stop_words)
-    time.sleep(0.3)
 
     fmap = {
         "recepten.php": f"{nav.get('listing_slug','services')}{ext}",
@@ -343,15 +345,27 @@ def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_f
         ("terms-of-service.php", "Terms of Service"),
     ]
 
-    for tpl_name, page_type in ai_pages:
-        if log_fn: log_fn(f"📝 {page_type}...")
+    def process_page(tpl_name, page_type):
         tpl_html = tpl.get(tpl_name, b"").decode("utf-8", errors="replace")
-        if not tpl_html: continue
+        if not tpl_html: return None, None
+        if log_fn: log_fn(f"📝 {page_type}...")
         new_html = generate_page(api_key, tpl_html, page_type, site_cfg, nav, stop_words, seo_kw, extra)
         out_name = fmap.get(tpl_name, tpl_name)
         if fmt == "html": out_name = out_name.replace(".php",".html")
-        output[out_name] = new_html.encode("utf-8")
-        time.sleep(0.3)
+        return out_name, new_html.encode("utf-8")
+
+    # Parallel generation — 4 pages at once
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(process_page, tn, pt): pt for tn, pt in ai_pages}
+        for future in as_completed(futures):
+            try:
+                out_name, content = future.result()
+                if out_name and content:
+                    with lock:
+                        output[out_name] = content
+                    if log_fn: log_fn(f"✅ {futures[future]}")
+            except Exception as e:
+                if log_fn: log_fn(f"❌ {futures[future]}: {e}")
 
     # 404
     h404 = tpl.get("404.html", b"").decode("utf-8", errors="replace")
