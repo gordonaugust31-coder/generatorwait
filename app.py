@@ -174,13 +174,21 @@ def brand_from_domain(domain):
 def call_claude(api_key, system, prompt, max_tokens=8000):
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role":"user","content":prompt}],
-    )
-    return msg.content[0].text
+    for attempt in range(3):
+        try:
+            msg = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role":"user","content":prompt}],
+            )
+            return msg.content[0].text
+        except Exception as e:
+            err = str(e).lower()
+            if ("rate" in err or "overloaded" in err or "529" in str(e) or "529" in err) and attempt < 2:
+                time.sleep(20 * (attempt + 1))
+            else:
+                raise
 
 def _clean_json(text):
     text = text.strip()
@@ -354,8 +362,8 @@ def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_f
         if fmt == "html": out_name = out_name.replace(".php",".html")
         return out_name, new_html.encode("utf-8")
 
-    # Parallel generation — 4 pages at once
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    # Parallel generation — 2 pages at once (safe for Tier 1 rate limits)
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(process_page, tn, pt): pt for tn, pt in ai_pages}
         for future in as_completed(futures):
             try:
