@@ -537,18 +537,34 @@ def build_one_site(api_key, site_cfg, tpl, fmt, stop_words, seo_kw, extra, log_f
 
     # Localize CDNs — download external libs to local files
     if log_fn: log_fn("📦 Локалізація CDN бібліотек...")
+    # Localize CDNs — try downloading, make external CSS non-blocking as fallback
+    if log_fn: log_fn("📦 CDN бібліотеки...")
     cdn_cache = download_cdn_files()
+    has_local = len(cdn_cache) > 5  # enough files downloaded?
+    
     for local_path, data in cdn_cache.items():
         output[local_path] = data
     
-    # Replace CDN URLs in all HTML/PHP files
     for fname in list(output.keys()):
         if fname.endswith((".php", ".html")):
             html = output[fname].decode("utf-8", errors="replace")
-            for cdn_url, local_path in CDN_FILES.items():
-                html = html.replace(cdn_url, local_path)
+            
+            if has_local:
+                # Replace CDN URLs with local paths
+                for cdn_url, local_path in CDN_FILES.items():
+                    html = html.replace(cdn_url, local_path)
+            else:
+                # Fallback: make external CSS non-blocking so page renders with local Tailwind
+                html = re.sub(
+                    r'<link\s+([^>]*href="https://[^"]+\.css"[^>]*)/>',
+                    r'<link \1 media="print" onload="this.media=\'all\'"/>',
+                    html
+                )
+            
+            # Remove Google Fonts (use system fonts)
             for link in GOOGLE_FONTS_REMOVE:
                 html = html.replace(link, "")
+            
             output[fname] = html.encode("utf-8")
 
     return output
